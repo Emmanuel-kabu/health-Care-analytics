@@ -1,0 +1,248 @@
+==========================================================
+HEALTHCARE ANALYTICS LAB - PART 3.1: STAR SCHEMA DESIGN DECISIONS
+==========================================================
+
+DECISION 1: Fact Table Grain
+=============================
+
+**CHOSEN OPTION: Option A - One row per encounter**
+
+Rationale:
+----------
+After analyzing the 4 business questions, "one row per encounter" provides the optimal grain because:
+
+1. **Query 1 (Monthly Encounters by Specialty)**: 
+   - Needs encounter-level aggregation by month/specialty/type
+   - Encounter grain allows direct COUNT(*) without complex joins
+
+2. **Query 2 (Top Diagnosis-Procedure Pairs)**:
+   - Needs to link diagnoses and procedures for the same encounter  
+   - Bridge tables will handle M:N relationships efficiently
+   - Encounter grain provides the natural link between diagnoses/procedures
+
+3. **Query 3 (30-Day Readmission Rate)**:
+   - Requires encounter dates and patient tracking
+   - Encounter grain gives direct access to admission/discharge dates
+   - Patient-level analysis aggregates from encounter level
+
+4. **Query 4 (Revenue by Specialty & Month)**:
+   - Billing is typically at encounter level
+   - Pre-aggregated billing totals in fact table eliminate joins
+
+**Alternative Options Rejected:**
+- Option B (diagnosis-level): Would require complex encounter reconstruction
+- Option C (procedure-level): Would duplicate encounter data unnecessarily
+
+**Benefits of Encounter Grain:**
+- Natural business grain for healthcare analytics
+- Supports all 4 query patterns efficiently  
+- Balances granularity with aggregation performance
+- Aligns with how clinicians think about patient care
+
+
+DECISION 2: Dimension Tables
+============================
+
+**2.1 Date Dimension (dim_date)**
+Columns:
+- date_key (PK, surrogate) - Format: YYYYMMDD integer
+- calendar_date (natural key)
+- year, quarter, month, day_of_month
+- day_of_week, week_of_year
+- is_weekend (boolean)
+- fiscal_year, fiscal_quarter (if needed)
+- holiday_flag (boolean)
+
+Justification: Pre-computed date attributes eliminate DATE_FORMAT() functions that prevent index usage.
+
+**2.2 Patient Dimension (dim_patient)**  
+Columns:
+- patient_key (PK, surrogate)
+- patient_id (natural key from OLTP)
+- first_name, last_name, full_name (concatenated)
+- gender, date_of_birth
+- age_at_first_encounter, current_age
+- age_group ('0-18', '19-35', '36-60', '60+')
+- mrn (medical record number)
+
+Justification: Age grouping enables demographic analysis without complex age calculations.
+
+**2.3 Provider Dimension (dim_provider)**
+Columns:  
+- provider_key (PK, surrogate)
+- provider_id (natural key)
+- first_name, last_name, full_name
+- credential, provider_type
+- specialty_key (FK to dim_specialty)
+- department_key (FK to dim_department)
+- specialty_name (denormalized)
+- department_name (denormalized)
+
+Justification: Denormalized specialty/department names eliminate joins for common queries.
+
+**2.4 Specialty Dimension (dim_specialty)**
+Columns:
+- specialty_key (PK, surrogate)  
+- specialty_id (natural key)
+- specialty_name, specialty_code
+- specialty_category ('Medical', 'Surgical', 'Diagnostic')
+
+Justification: Separate dimension supports specialty-focused analytics and hierarchical reporting.
+
+**2.5 Department Dimension (dim_department)**
+Columns:
+- department_key (PK, surrogate)
+- department_id (natural key)
+- department_name, floor, capacity
+- department_type ('Inpatient', 'Outpatient', 'Emergency')
+- cost_center_code
+
+Justification: Operational analytics require department-level metrics.
+
+**2.6 Encounter Type Dimension (dim_encounter_type)**
+Columns:
+- encounter_type_key (PK, surrogate)
+- encounter_type ('Inpatient', 'Outpatient', 'ER')
+- type_description, typical_duration_hours
+- requires_admission (boolean)
+
+Justification: Small lookup dimension with business rules.
+
+**2.7 Diagnosis Dimension (dim_diagnosis)**  
+Columns:
+- diagnosis_key (PK, surrogate)
+- diagnosis_id (natural key)
+- icd10_code, icd10_description
+- diagnosis_category, body_system
+- severity_level, chronic_flag
+
+Justification: ICD-10 codes require detailed tracking for clinical and billing analysis.
+
+**2.8 Procedure Dimension (dim_procedure)**
+Columns:
+- procedure_key (PK, surrogate)  
+- procedure_id (natural key)
+- cpt_code, cpt_description
+- procedure_category, procedure_type  
+- typical_cost_range, duration_minutes
+
+Justification: CPT codes are critical for revenue analysis and operational planning.
+
+
+DECISION 3: Pre-Aggregated Metrics  
+==================================
+
+**Metrics to Pre-Aggregate in Fact Table:**
+
+**3.1 diagnosis_count (INT)**
+- Count of diagnoses per encounter
+- Eliminates COUNT(*) on bridge_encounter_diagnoses
+- Supports quick "encounters with multiple diagnoses" analysis
+
+**3.2 procedure_count (INT)**  
+- Count of procedures per encounter
+- Eliminates COUNT(*) on bridge_encounter_procedures
+- Enables "high-procedure encounters" identification
+
+**3.3 total_claim_amount (DECIMAL(12,2))**
+- Sum of all billing.claim_amount for the encounter
+- Eliminates SUM() joins to billing table
+- Critical for revenue analysis (Query 4)
+
+**3.4 total_allowed_amount (DECIMAL(12,2))**
+- Sum of all billing.allowed_amount for the encounter  
+- Primary revenue metric for analytics
+- Faster than real-time billing table joins
+
+**3.5 length_of_stay_hours (INT)**
+- Pre-calculated from encounter_date to discharge_date
+- Eliminates DATEDIFF calculations
+- Key operational metric
+
+**3.6 primary_diagnosis_key (INT)**
+- Foreign key to most significant diagnosis (sequence=1)
+- Enables single-diagnosis analysis without bridge table
+- Faster primary diagnosis reporting
+
+**Performance Justification:**
+- Query 1: diagnosis_count/procedure_count avoid bridge table scans
+- Query 2: Bridge tables still needed for pair analysis
+- Query 3: length_of_stay_hours enables efficient readmission logic
+- Query 4: Pre-aggregated amounts eliminate billing joins entirely
+
+**Trade-offs Accepted:**
+- Storage overhead: ~40 bytes per fact row
+- ETL complexity: Must calculate aggregates during load
+- Data freshness: Aggregates updated during ETL cycles
+
+
+DECISION 4: Bridge Tables Strategy
+=================================
+
+**DECISION: Use Bridge Tables for M:N Relationships**
+
+**4.1 Bridge Table: bridge_encounter_diagnoses**
+Purpose: Many encounters have multiple diagnoses
+Columns:
+- bridge_id (PK)
+- encounter_key (FK to fact_encounters)  
+- diagnosis_key (FK to dim_diagnosis)
+- diagnosis_sequence (1=primary, 2=secondary, etc.)
+- diagnosis_present_on_admission (boolean)
+
+**4.2 Bridge Table: bridge_encounter_procedures**
+Purpose: Many encounters have multiple procedures  
+Columns:
+- bridge_id (PK)
+- encounter_key (FK to fact_encounters)
+- procedure_key (FK to dim_procedure)  
+- procedure_date, procedure_sequence
+- modifier_codes, procedure_status
+
+**Rationale for Bridge Tables:**
+
+**Why NOT Denormalize into Fact Table:**
+1. **Variable Cardinality**: Some encounters have 1 diagnosis, others have 10+
+2. **Sparse Data**: Would create many NULL columns in fact table
+3. **Query Complexity**: "Top diagnosis-procedure pairs" requires M:N join anyway
+4. **Storage Efficiency**: Bridge tables only store actual relationships
+
+**Why Bridge Tables ARE Worth It:**
+1. **Query 2 Requirement**: Diagnosis-procedure pairs need M:N relationship
+2. **Analytical Flexibility**: Support "co-occurrence analysis"  
+3. **Data Integrity**: Enforce referential integrity
+4. **Future Queries**: Enable complex diagnostic pattern analysis
+
+**Alternative Considered - Flattened Fact Table:**
+- Could have procedure1_key, procedure2_key, diagnosis1_key, diagnosis2_key columns
+- **REJECTED because**: 
+  - Arbitrary limits (what if 15 diagnoses?)
+  - Sparse matrix (mostly NULL values)
+  - Complex SQL (UNION across procedure1, procedure2, etc.)
+
+**Bridge Table Performance Optimization:**
+- Composite indexes: (encounter_key, diagnosis_key), (encounter_key, procedure_key)
+- Sequence-based queries can use (encounter_key, sequence) indexes
+- Small tables relative to fact table (high selectivity)
+
+
+DESIGN DECISION SUMMARY
+========================
+
+Final Star Schema Architecture:
+1. **Fact Grain**: One row per encounter (optimal for all 4 queries)
+2. **Dimensions**: 8 core dimensions with appropriate denormalization
+3. **Pre-Aggregation**: 6 key metrics to eliminate expensive joins
+4. **Bridge Tables**: 2 bridge tables for M:N diagnosis/procedure relationships
+
+**Expected Performance Improvements:**
+- Query 1: 5-8x faster (pre-aggregated counts, date dimension)
+- Query 2: 3-4x faster (optimized bridge tables vs. 4-table joins)  
+- Query 3: 8-10x faster (pre-calculated dates, no self-joins)
+- Query 4: 10-12x faster (pre-aggregated revenue, direct dimension joins)
+
+**Key Design Principles Applied:**
+1. **Query-Driven Design**: Each decision supports the 4 business questions
+2. **Balance**: Optimal trade-off between performance and complexity
+3. **Flexibility**: Design supports future analytical requirements
+4. **Industry Best Practices**: Standard dimensional modeling techniques

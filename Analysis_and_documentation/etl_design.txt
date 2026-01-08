@@ -1,0 +1,440 @@
+=============================================================
+HEALTHCARE ANALYTICS LAB - PART 3.4: ETL DESIGN DOCUMENTATION
+=============================================================
+
+OVERVIEW
+========
+This document outlines the Extract, Transform, Load (ETL) strategy for 
+converting the normalized OLTP healthcare system into an optimized star 
+schema data warehouse. The ETL process will run nightly to provide 
+fresh data for analytical reporting.
+
+=============================================================
+SECTION 1: DIMENSION LOAD LOGIC
+=============================================================
+
+1.1 DIM_DATE POPULATION (ONE-TIME LOAD)
+=======================================
+
+Process Type: One-time bulk load + annual maintenance
+Load Strategy: Generate date records for 10-year span (past 5 years + future 5 years)
+
+Pseudocode:
+-----------
+BEGIN dim_date_load
+    SET @start_date = '2020-01-01'
+    SET @end_date = '2030-12-31'
+    
+    WHILE @current_date <= @end_date DO
+        INSERT INTO dim_date (
+            date_key,
+            calendar_date, 
+            year,
+            quarter,
+            month,
+            day_of_month,
+            week_of_year,
+            day_of_week,
+            is_weekend,
+            fiscal_year,
+            fiscal_quarter,
+            holiday_flag
+        ) VALUES (
+            FORMAT(@current_date, 'yyyyMMdd'),
+            @current_date,
+            YEAR(@current_date),
+            QUARTER(@current_date), 
+            MONTH(@current_date),
+            DAY(@current_date),
+            WEEK(@current_date),
+            DAYNAME(@current_date),
+            CASE WHEN DAYOFWEEK(@current_date) IN (1,7) THEN TRUE ELSE FALSE END,
+            CASE WHEN MONTH(@current_date) >= 7 THEN YEAR(@current_date)+1 ELSE YEAR(@current_date) END,
+            -- Additional fiscal and holiday logic here
+            FALSE  -- holiday_flag (lookup against holiday table)
+        )
+        
+        SET @current_date = DATE_ADD(@current_date, INTERVAL 1 DAY)
+    END WHILE
+END
+
+Maintenance: Annual job to extend date range by 1 year
+
+1.2 DIM_PATIENT POPULATION (INCREMENTAL)
+========================================
+
+Process Type: Type 1 SCD (Slowly Changing Dimension) - Overwrite changes
+Load Strategy: Daily incremental load with change detection
+
+Logic:
+------
+1. Extract new/modified patients from OLTP (based on last_modified_date)
+2. Calculate age groups and derived fields
+3. Upsert into dim_patient (INSERT new, UPDATE existing)
+
+Pseudocode:
+-----------
+BEGIN dim_patient_load
+    -- Extract changed patients from source
+    CREATE TEMP TABLE staging_patients AS
+    SELECT 
+        patient_id,
+        first_name,
+        last_name,
+        CONCAT(first_name, ' ', last_name) AS full_name,
+        gender,
+        date_of_birth,
+        TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) AS current_age,
+        CASE 
+            WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) <= 18 THEN '0-18'
+            WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) <= 35 THEN '19-35'
+            WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) <= 60 THEN '36-60'
+            ELSE '60+'
+        END AS age_group,
+        mrn
+    FROM patients 
+    WHERE last_modified_date >= @last_etl_run_date
+    
+    -- Upsert logic
+    FOR each patient in staging_patients DO
+        IF EXISTS(SELECT 1 FROM dim_patient WHERE patient_id = staging.patient_id) THEN
+            UPDATE dim_patient SET
+                first_name = staging.first_name,
+                last_name = staging.last_name,
+                full_name = staging.full_name,
+                current_age = staging.current_age,
+                age_group = staging.age_group
+            WHERE patient_id = staging.patient_id
+        ELSE
+            INSERT INTO dim_patient (patient_id, first_name, ...) 
+            VALUES (staging.patient_id, staging.first_name, ...)
+        END IF
+    END FOR
+    
+    -- Update last ETL run timestamp
+    UPDATE etl_control SET last_run_date = NOW() WHERE table_name = 'dim_patient'
+END
+
+1.3 DIM_SPECIALTY POPULATION (FULL REFRESH)
+===========================================
+
+Process Type: Full refresh (small table)
+Load Strategy: Truncate and reload
+
+Logic:
+------
+TRUNCATE dim_specialty
+INSERT INTO dim_specialty 
+SELECT 
+    specialty_id,
+    specialty_name,
+    specialty_code,
+    CASE 
+        WHEN specialty_name IN ('Cardiology', 'Internal Medicine') THEN 'Medical'
+        WHEN specialty_name IN ('Surgery', 'Orthopedics') THEN 'Surgical'  
+        ELSE 'Diagnostic'
+    END AS specialty_category
+FROM specialties
+
+1.4 DIM_DEPARTMENT, DIM_PROVIDER, DIM_ENCOUNTER_TYPE (SIMILAR PATTERNS)
+======================================================================
+
+All follow similar patterns:
+- Small reference tables: Full refresh
+- Provider dimension: Incremental with denormalized specialty/department names
+- Lookup specialty_key and department_key during provider load
+
+=============================================================
+SECTION 2: FACT TABLE LOAD LOGIC  
+=============================================================
+
+2.1 FACT_ENCOUNTERS POPULATION (INCREMENTAL)
+============================================
+
+Process Type: Incremental load with pre-aggregated metrics calculation
+Load Strategy: Process encounters modified since last ETL run
+
+Comprehensive Logic:
+-------------------
+BEGIN fact_encounters_load
+    -- Stage 1: Extract modified encounters with dimension lookups
+    CREATE TEMP TABLE staging_encounters AS
+    SELECT 
+        e.encounter_id,
+        dp.patient_key,
+        dpr.provider_key,
+        dd_enc.date_key AS encounter_date_key,
+        dd_dis.date_key AS discharge_date_key,  
+        det.encounter_type_key,
+        ds.specialty_key,
+        ddep.department_key,
+        e.encounter_date AS encounter_datetime,
+        e.discharge_date AS discharge_datetime,
+        TIMESTAMPDIFF(HOUR, e.encounter_date, e.discharge_date) AS length_of_stay_hours
+    FROM encounters e
+    JOIN dim_patient dp ON e.patient_id = dp.patient_id
+    JOIN dim_provider dpr ON e.provider_id = dpr.provider_id  
+    JOIN dim_date dd_enc ON DATE(e.encounter_date) = dd_enc.calendar_date
+    LEFT JOIN dim_date dd_dis ON DATE(e.discharge_date) = dd_dis.calendar_date
+    JOIN dim_encounter_type det ON e.encounter_type = det.encounter_type
+    JOIN dim_specialty ds ON dpr.specialty_key = ds.specialty_key
+    JOIN dim_department ddep ON dpr.department_key = ddep.department_key
+    WHERE e.last_modified_date >= @last_etl_run_date
+    
+    -- Stage 2: Calculate pre-aggregated diagnosis counts
+    CREATE TEMP TABLE diagnosis_counts AS
+    SELECT 
+        se.encounter_id,
+        COUNT(ed.diagnosis_id) AS diagnosis_count,
+        MIN(CASE WHEN ed.diagnosis_sequence = 1 THEN dd.diagnosis_key END) AS primary_diagnosis_key
+    FROM staging_encounters se
+    LEFT JOIN encounter_diagnoses ed ON se.encounter_id = ed.encounter_id
+    LEFT JOIN dim_diagnosis dd ON ed.diagnosis_id = dd.diagnosis_id
+    GROUP BY se.encounter_id
+    
+    -- Stage 3: Calculate pre-aggregated procedure counts
+    CREATE TEMP TABLE procedure_counts AS
+    SELECT 
+        se.encounter_id,
+        COUNT(ep.procedure_id) AS procedure_count
+    FROM staging_encounters se  
+    LEFT JOIN encounter_procedures ep ON se.encounter_id = ep.encounter_id
+    GROUP BY se.encounter_id
+    
+    -- Stage 4: Calculate pre-aggregated billing amounts
+    CREATE TEMP TABLE billing_totals AS
+    SELECT 
+        se.encounter_id,
+        COALESCE(SUM(b.claim_amount), 0) AS total_claim_amount,
+        COALESCE(SUM(b.allowed_amount), 0) AS total_allowed_amount
+    FROM staging_encounters se
+    LEFT JOIN billing b ON se.encounter_id = b.encounter_id
+    GROUP BY se.encounter_id
+    
+    -- Stage 5: Combine all metrics and upsert into fact table
+    FOR each encounter in staging_encounters DO
+        IF EXISTS(SELECT 1 FROM fact_encounters WHERE encounter_id = staging.encounter_id) THEN
+            UPDATE fact_encounters SET
+                patient_key = staging.patient_key,
+                provider_key = staging.provider_key,
+                encounter_date_key = staging.encounter_date_key,
+                -- ... update all fields
+                diagnosis_count = diagnosis_counts.diagnosis_count,
+                procedure_count = procedure_counts.procedure_count,
+                total_claim_amount = billing_totals.total_claim_amount,
+                total_allowed_amount = billing_totals.total_allowed_amount
+            WHERE encounter_id = staging.encounter_id
+        ELSE
+            INSERT INTO fact_encounters (...) VALUES (...)
+        END IF
+    END FOR
+END
+
+Data Quality Checks:
+-------------------
+- Verify all dimension keys resolve (no orphaned records)
+- Check for negative amounts or impossible dates
+- Validate length_of_stay_hours calculations
+- Ensure diagnosis_count >= 1 (every encounter needs diagnosis)
+
+=============================================================
+SECTION 3: BRIDGE TABLE LOAD LOGIC
+=============================================================
+
+3.1 BRIDGE_ENCOUNTER_DIAGNOSES POPULATION
+=========================================
+
+Process Type: Incremental load based on modified encounters
+Load Strategy: Delete existing + insert new for modified encounters
+
+Logic:
+------
+BEGIN bridge_encounter_diagnoses_load
+    -- Clean existing records for modified encounters
+    DELETE FROM bridge_encounter_diagnoses 
+    WHERE encounter_key IN (
+        SELECT encounter_key FROM fact_encounters 
+        WHERE encounter_id IN (@modified_encounter_ids)
+    )
+    
+    -- Insert fresh diagnosis relationships
+    INSERT INTO bridge_encounter_diagnoses (
+        encounter_key,
+        diagnosis_key, 
+        diagnosis_sequence,
+        diagnosis_present_on_admission
+    )
+    SELECT 
+        f.encounter_key,
+        dd.diagnosis_key,
+        ed.diagnosis_sequence,
+        TRUE -- assume POA unless specified
+    FROM encounter_diagnoses ed
+    JOIN fact_encounters f ON ed.encounter_id = f.encounter_id
+    JOIN dim_diagnosis dd ON ed.diagnosis_id = dd.diagnosis_id
+    WHERE ed.encounter_id IN (@modified_encounter_ids)
+    ORDER BY ed.encounter_id, ed.diagnosis_sequence
+END
+
+3.2 BRIDGE_ENCOUNTER_PROCEDURES POPULATION  
+==========================================
+
+Similar pattern to diagnoses bridge table:
+
+Logic:
+------
+BEGIN bridge_encounter_procedures_load
+    -- Clean existing records
+    DELETE FROM bridge_encounter_procedures 
+    WHERE encounter_key IN (SELECT encounter_key FROM fact_encounters WHERE encounter_id IN (@modified_encounter_ids))
+    
+    -- Insert fresh procedure relationships
+    INSERT INTO bridge_encounter_procedures (
+        encounter_key,
+        procedure_key,
+        procedure_date_key,
+        procedure_sequence
+    )
+    SELECT 
+        f.encounter_key,
+        dp.procedure_key,
+        dd.date_key AS procedure_date_key,
+        ROW_NUMBER() OVER (PARTITION BY ep.encounter_id ORDER BY ep.procedure_date) AS procedure_sequence
+    FROM encounter_procedures ep
+    JOIN fact_encounters f ON ep.encounter_id = f.encounter_id  
+    JOIN dim_procedure dp ON ep.procedure_id = dp.procedure_id
+    JOIN dim_date dd ON ep.procedure_date = dd.calendar_date
+    WHERE ep.encounter_id IN (@modified_encounter_ids)
+END
+
+=============================================================
+SECTION 4: REFRESH STRATEGY
+=============================================================
+
+4.1 OVERALL ETL SCHEDULE
+========================
+
+Daily ETL Process (2:00 AM - 4:00 AM window):
+1. 2:00 AM - Extract and stage data from OLTP
+2. 2:15 AM - Load/update dimension tables (incremental)
+3. 2:30 AM - Load/update fact_encounters (incremental) 
+4. 3:00 AM - Load/update bridge tables
+5. 3:30 AM - Data quality validation and reconciliation
+6. 3:45 AM - Update ETL control tables and refresh views
+7. 4:00 AM - ETL completion notification
+
+Weekly ETL Process (Saturday 6:00 PM):
+- Full refresh of small reference dimensions
+- Index maintenance and statistics updates
+- Data archival for encounters older than 7 years
+
+4.2 INCREMENTAL LOAD STRATEGY  
+=============================
+
+Change Detection Methods:
+1. OLTP tables have last_modified_date timestamp columns
+2. ETL control table tracks last successful load per table
+3. Only process records where last_modified_date > last_etl_run_date
+
+Incremental Key Logic:
+- Dimensions: Upsert based on natural key (patient_id, provider_id, etc.)
+- Fact table: Upsert based on encounter_id
+- Bridge tables: Delete+Insert for modified encounters
+
+4.3 HANDLING LATE-ARRIVING FACTS
+================================
+
+Challenge: Billing data may arrive days after encounter
+Solution: Extended incremental window
+
+Logic:
+------
+-- Look back 7 days for any billing updates
+SELECT encounter_id FROM billing 
+WHERE last_modified_date >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+
+-- Recalculate billing totals for these encounters
+UPDATE fact_encounters f
+SET total_claim_amount = (SELECT SUM(claim_amount) FROM billing WHERE encounter_id = f.encounter_id),
+    total_allowed_amount = (SELECT SUM(allowed_amount) FROM billing WHERE encounter_id = f.encounter_id)
+WHERE encounter_id IN (@late_arriving_encounters)
+
+4.4 DATA QUALITY AND RECONCILIATION
+===================================
+
+Validation Checks:
+1. Row count reconciliation (source vs. target)
+2. Sum reconciliation for financial amounts  
+3. Referential integrity checks (all FKs resolve)
+4. Business rule validation (length_of_stay >= 0, etc.)
+
+Daily Reconciliation Report:
+- Source system row counts vs. warehouse row counts
+- Revenue totals by specialty (source vs. warehouse)
+- Data freshness indicators
+- Failed record counts and error details
+
+Error Handling:
+- Failed records logged to error tables for investigation
+- ETL continues processing (doesn't fail completely)  
+- Daily error report sent to data engineering team
+- Automatic retry logic for transient failures
+
+=============================================================
+SECTION 5: DEPLOYMENT CONSIDERATIONS
+=============================================================
+
+5.1 INITIAL DATA LOAD (ONE-TIME)
+================================
+
+Historical Load Strategy:
+1. Load 5 years of historical encounter data
+2. Batch process in monthly chunks to avoid memory issues
+3. Disable indexes during bulk load, rebuild after completion
+4. Estimated timeline: 2-3 days for full historical load
+
+5.2 PRODUCTION IMPLEMENTATION  
+=============================
+
+Phased Rollout:
+Phase 1: Parallel load (OLTP + warehouse) for validation
+Phase 2: Read-only analytical queries on warehouse  
+Phase 3: Full cutover of reporting to warehouse
+Phase 4: Decommission OLTP analytical views
+
+Performance Considerations:
+- ETL window: 2 hours maximum (2:00 AM - 4:00 AM)
+- Source system impact: Read-only queries during low usage
+- Target system: Optimized indexes for analytical queries
+- Monitoring: ETL duration and success rate tracking
+
+5.3 SCALABILITY PLANNING
+=======================
+
+Growth Projections:
+- Current: ~10,000 encounters/year  
+- 5-year projection: ~50,000 encounters/year
+- Dimension growth: Minimal (providers, specialties stable)
+
+Scaling Strategy:
+- Partitioning fact_encounters by year when > 1M rows
+- Archive old data to separate historical schema  
+- Consider column-store indexes for large aggregations
+- Implement parallel ETL processing for multiple departments
+
+=============================================================
+ETL DESIGN SUMMARY
+=============================================================
+
+Key Design Principles:
+1. **Incremental Processing**: Only process changed data
+2. **Pre-Aggregation**: Calculate metrics during ETL, not query time
+3. **Data Quality**: Built-in validation and reconciliation  
+4. **Scalability**: Designed for 5x growth over 5 years
+5. **Reliability**: Error handling and monitoring throughout
+
+Expected Benefits:
+- ETL Runtime: 2 hours daily (acceptable maintenance window)
+- Data Freshness: T+1 day (adequate for analytical reporting)  
+- Query Performance: 5-18x improvement over OLTP queries
+- Data Quality: Automated validation and error reporting

@@ -1,0 +1,232 @@
+=============================================================
+HEALTHCARE ANALYTICS LAB - PART 2: QUERY PERFORMANCE ANALYSIS  
+=============================================================
+
+QUESTION 1: Monthly Encounters by Specialty
+============================================
+
+SQL Query:
+----------
+SELECT 
+    DATE_FORMAT(e.encounter_date, '%Y-%m') AS month,
+    s.specialty_name,
+    e.encounter_type,
+    COUNT(*) AS total_encounters,
+    COUNT(DISTINCT e.patient_id) AS unique_patients
+FROM encounters e
+JOIN providers p ON e.provider_id = p.provider_id
+JOIN specialties s ON p.specialty_id = s.specialty_id
+GROUP BY DATE_FORMAT(e.encounter_date, '%Y-%m'), s.specialty_name, e.encounter_type
+ORDER BY month, s.specialty_name, e.encounter_type;
+
+Schema Analysis:
+---------------
+Tables joined: encounters, providers, specialties
+Number of joins: 2
+Join chain: encounters → providers → specialties
+Aggregation: GROUP BY with COUNT() and COUNT(DISTINCT)
+
+Performance:
+-----------
+Execution time: ~1.2 seconds (estimated)
+Estimated rows scanned: 
+- encounters table: full scan (~10,000+ rows)
+- providers table: lookup per encounter (~1,000 rows)  
+- specialties table: lookup per provider (~10 rows)
+Total rows processed: ~20,000+
+
+Bottleneck Identified:
+---------------------
+1. Multiple JOIN chain creates cartesian product risk
+2. GROUP BY on computed DATE_FORMAT() prevents index usage
+3. COUNT(DISTINCT) requires sorting/hashing for uniqueness
+4. No index on encounter_date for efficient date filtering
+5. Full table scan on encounters table
+
+Root Cause: Complex aggregation with multi-table joins and computed grouping columns
+
+
+QUESTION 2: Top Diagnosis-Procedure Pairs
+==========================================
+
+SQL Query:
+----------
+SELECT 
+    d.icd10_code,
+    d.icd10_description,
+    pr.cpt_code,
+    pr.cpt_description,
+    COUNT(*) AS encounter_count
+FROM encounter_diagnoses ed
+JOIN diagnoses d ON ed.diagnosis_id = d.diagnosis_id
+JOIN encounters e ON ed.encounter_id = e.encounter_id
+JOIN encounter_procedures ep ON e.encounter_id = ep.encounter_id
+JOIN procedures pr ON ep.procedure_id = pr.procedure_id
+GROUP BY d.icd10_code, d.icd10_description, pr.cpt_code, pr.cpt_description
+ORDER BY encounter_count DESC
+LIMIT 10;
+
+Schema Analysis:
+---------------
+Tables joined: encounter_diagnoses, diagnoses, encounters, encounter_procedures, procedures
+Number of joins: 4
+Join pattern: Two junction tables connected through encounters table
+Many-to-many relationships: diagnoses ↔ encounters ↔ procedures
+
+Performance:
+-----------
+Execution time: ~2.8 seconds (estimated)
+Estimated rows scanned:
+- encounter_diagnoses: ~15,000 rows
+- encounter_procedures: ~12,000 rows  
+- encounters: ~10,000 rows
+- diagnoses: ~500 rows
+- procedures: ~300 rows
+Total rows processed: ~75,000+ (due to row explosion)
+
+Bottleneck Identified:
+---------------------
+1. ROW EXPLOSION: Junction tables create M×N combinations
+2. Complex 4-table join chain with no optimal join order
+3. Bridge table pattern requires scanning multiple junction tables
+4. No composite indexes on junction tables for efficient joins
+5. Large intermediate result set before GROUP BY
+
+Root Cause: Many-to-many relationships causing exponential row multiplication
+
+
+QUESTION 3: 30-Day Readmission Rate  
+===================================
+
+SQL Query:
+----------
+WITH inpatient_discharges AS (
+    SELECT 
+        e.encounter_id,
+        e.patient_id,
+        e.discharge_date,
+        p.specialty_id,
+        s.specialty_name
+    FROM encounters e
+    JOIN providers p ON e.provider_id = p.provider_id  
+    JOIN specialties s ON p.specialty_id = s.specialty_id
+    WHERE e.encounter_type = 'Inpatient' 
+    AND e.discharge_date IS NOT NULL
+),
+readmissions AS (
+    SELECT 
+        id.encounter_id AS initial_encounter,
+        id.specialty_id,
+        id.specialty_name,
+        COUNT(e2.encounter_id) AS readmission_count
+    FROM inpatient_discharges id
+    LEFT JOIN encounters e2 ON id.patient_id = e2.patient_id
+        AND e2.encounter_date > id.discharge_date
+        AND e2.encounter_date <= DATE_ADD(id.discharge_date, INTERVAL 30 DAY)
+        AND e2.encounter_type IN ('Inpatient', 'ER')
+    GROUP BY id.encounter_id, id.specialty_id, id.specialty_name
+)
+SELECT specialty_name, total_discharges, total_readmissions, readmission_rate_percent
+FROM specialty_readmission_rates
+ORDER BY readmission_rate_percent DESC;
+
+Schema Analysis:
+---------------
+Tables joined: encounters (self-joined), providers, specialties
+Number of joins: 3 (including self-join)
+Complex pattern: Self-join with date range conditions
+Multiple CTEs with aggregation
+
+Performance:
+-----------
+Execution time: ~3.5 seconds (estimated)  
+Estimated rows scanned:
+- encounters table: scanned twice (~20,000 total)
+- Date range comparisons: N×M combinations for each patient
+- Provider/specialty lookups: additional overhead
+Total operations: ~50,000+ comparisons
+
+Bottleneck Identified:
+---------------------
+1. SELF-JOIN on encounters table - most expensive operation
+2. Date range calculations (DATE_ADD) prevent index usage
+3. For each inpatient encounter, scan ALL future encounters for same patient
+4. No index on (patient_id, encounter_date) for efficient range queries
+5. Complex date arithmetic in WHERE clause
+6. Multiple CTE materialization overhead
+
+Root Cause: Self-joins on large tables with complex temporal conditions
+
+
+QUESTION 4: Revenue by Specialty & Month
+========================================
+
+SQL Query:
+----------
+SELECT 
+    DATE_FORMAT(e.encounter_date, '%Y-%m') AS month,
+    s.specialty_name,
+    SUM(b.claim_amount) AS total_claim_amount,
+    SUM(b.allowed_amount) AS total_allowed_amount,
+    COUNT(DISTINCT e.encounter_id) AS total_encounters,
+    ROUND(AVG(b.allowed_amount), 2) AS avg_allowed_per_encounter
+FROM billing b
+JOIN encounters e ON b.encounter_id = e.encounter_id
+JOIN providers p ON e.provider_id = p.provider_id
+JOIN specialties s ON p.specialty_id = s.specialty_id
+GROUP BY DATE_FORMAT(e.encounter_date, '%Y-%m'), s.specialty_id, s.specialty_name
+ORDER BY month, total_allowed_amount DESC;
+
+Schema Analysis:
+---------------
+Tables joined: billing, encounters, providers, specialties  
+Number of joins: 3
+Join chain: billing → encounters → providers → specialties
+Aggregation: SUM(), COUNT(DISTINCT), AVG() with GROUP BY
+
+Performance:
+-----------
+Execution time: ~1.8 seconds (estimated)
+Estimated rows scanned:
+- billing table: ~8,000 rows
+- encounters table: lookup per billing record
+- providers table: lookup per encounter  
+- specialties table: lookup per provider
+Total rows processed: ~25,000+
+
+Bottleneck Identified:
+---------------------
+1. Long JOIN chain creates dependency bottleneck
+2. GROUP BY on computed DATE_FORMAT() prevents index usage  
+3. Multiple aggregation functions (SUM, COUNT DISTINCT, AVG) 
+4. No covering indexes for the join columns
+5. Billing table lacks proper indexing on encounter_id
+6. Computed grouping column requires full table processing
+
+Root Cause: Multi-table join chain with expensive aggregations and computed grouping
+
+
+=============================================================
+OVERALL PERFORMANCE SUMMARY
+=============================================================
+
+Common Performance Issues Identified:
+1. **Multiple JOIN Chains**: All queries require 2-4 table joins
+2. **Missing Indexes**: No proper indexes for join columns and date ranges  
+3. **Computed GROUP BY**: DATE_FORMAT() prevents index usage
+4. **Row Explosion**: Many-to-many relationships create large intermediate results
+5. **Self-Joins**: Temporal queries require expensive self-join operations
+6. **Complex Aggregations**: COUNT(DISTINCT), multiple aggregation functions
+
+Expected Performance with Sample Data:
+- Query 1: 1.2 seconds (2-table joins + aggregation)
+- Query 2: 2.8 seconds (4-table joins + row explosion) 
+- Query 3: 3.5 seconds (self-join + temporal analysis)
+- Query 4: 1.8 seconds (3-table join chain + aggregation)
+
+Why Star Schema Will Be Faster:
+1. **Fewer Joins**: Direct dimension lookups vs. join chains
+2. **Pre-aggregated Metrics**: Avoid real-time calculations
+3. **Denormalization**: Reduce number of tables to join
+4. **Better Indexing**: Optimized for analytical queries
+5. **Date Dimension**: Pre-computed date attributes

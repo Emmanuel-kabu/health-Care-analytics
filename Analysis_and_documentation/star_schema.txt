@@ -1,0 +1,152 @@
+==========================================================
+STAR SCHEMA ANALYTICS QUERIES
+Fact table: fact_encounters
+Grain: One row per encounter
+==========================================================
+
+
+----------------------------------------------------------
+1️ Total Encounters Per Year
+----------------------------------------------------------
+SELECT 
+    d.year,
+    COUNT(*) AS total_encounters
+FROM fact_encounters f
+JOIN dim_date d
+    ON f.date_key = d.date_key
+GROUP BY d.year
+ORDER BY d.year;
+
+
+----------------------------------------------------------
+2️ Monthly Revenue Trend
+----------------------------------------------------------
+SELECT 
+    d.year,
+    d.month,
+    SUM(f.total_claim_amount) AS total_revenue
+FROM fact_encounters f
+JOIN dim_date d
+    ON f.date_key = d.date_key
+GROUP BY d.year, d.month
+ORDER BY d.year, d.month;
+
+
+----------------------------------------------------------
+3️ Encounters by Department
+----------------------------------------------------------
+SELECT 
+    dept.department_name,
+    COUNT(*) AS encounter_count
+FROM fact_encounters f
+JOIN dim_provider p
+    ON f.provider_key = p.provider_key
+JOIN dim_department dept
+    ON p.department_key = dept.department_key
+GROUP BY dept.department_name
+ORDER BY encounter_count DESC;
+
+
+----------------------------------------------------------
+4️ Top 10 Diagnoses by Volume
+----------------------------------------------------------
+SELECT 
+    d.icd10_code,
+    d.icd10_description,
+    COUNT(*) AS diagnosis_count
+FROM bridge_encounter_diagnoses b
+JOIN dim_diagnosis d
+    ON b.diagnosis_key = d.diagnosis_key
+GROUP BY d.icd10_code, d.icd10_description
+ORDER BY diagnosis_count DESC
+LIMIT 10;
+
+
+----------------------------------------------------------
+5️ Provider Productivity (Encounters per Provider)
+----------------------------------------------------------
+SELECT 
+    p.first_name,
+    p.last_name,
+    s.specialty_name,
+    COUNT(*) AS total_encounters
+FROM fact_encounters f
+JOIN dim_provider p
+    ON f.provider_key = p.provider_key
+JOIN dim_specialty s
+    ON p.specialty_key = s.specialty_key
+GROUP BY p.first_name, p.last_name, s.specialty_name
+ORDER BY total_encounters DESC;
+
+
+----------------------------------------------------------
+6️ Average Claim Amount per Encounter Type
+----------------------------------------------------------
+SELECT 
+    et.encounter_type,
+    AVG(f.total_claim_amount) AS avg_claim
+FROM fact_encounters f
+JOIN dim_encounter_type et
+    ON f.encounter_type_key = et.encounter_type_key
+GROUP BY et.encounter_type
+ORDER BY avg_claim DESC;
+
+
+----------------------------------------------------------
+7️ Encounters by Patient Age Group
+----------------------------------------------------------
+SELECT 
+    p.age_group,
+    COUNT(*) AS encounter_count
+FROM fact_encounters f
+JOIN dim_patient p
+    ON f.patient_key = p.patient_key
+GROUP BY p.age_group
+ORDER BY encounter_count DESC;
+
+
+----------------------------------------------------------
+8️ Length of Stay (If discharge date is available)
+----------------------------------------------------------
+SELECT 
+    p.first_name,
+    p.last_name,
+    DATEDIFF(f.discharge_date, d.calendar_date) AS length_of_stay
+FROM fact_encounters f
+JOIN dim_patient p
+    ON f.patient_key = p.patient_key
+JOIN dim_date d
+    ON f.date_key = d.date_key
+WHERE f.discharge_date IS NOT NULL;
+
+
+----------------------------------------------------------
+9️ Most Common Procedure Codes
+----------------------------------------------------------
+SELECT 
+    pr.cpt_code,
+    pr.cpt_description,
+    COUNT(*) AS total_times_performed
+FROM bridge_encounter_procedures b
+JOIN dim_procedure pr
+    ON b.procedure_key = pr.procedure_key
+GROUP BY pr.cpt_code, pr.cpt_description
+ORDER BY total_times_performed DESC
+LIMIT 10;
+
+
+----------------------------------------------------------
+Revenue by Diagnosis
+----------------------------------------------------------
+SELECT 
+    d.icd10_code,
+    d.icd10_description,
+    SUM(f.total_claim_amount) AS total_revenue
+FROM fact_encounters f
+JOIN bridge_encounter_diagnoses b
+    ON f.encounter_key = b.encounter_key
+JOIN dim_diagnosis d
+    ON b.diagnosis_key = d.diagnosis_key
+GROUP BY d.icd10_code, d.icd10_description
+ORDER BY total_revenue DESC;
+

@@ -1,0 +1,20 @@
+# Healthcare Analytics Project - Minimal Dependencies
+# Data Engineering Mini Project - OLTP to Star Schema
+
+# Core Data Analysis
+pandas==2.1.4
+numpy==1.26.2
+
+# Database Connectivity
+sqlalchemy==2.0.25
+pymysql==1.1.0
+
+# Basic Visualization
+matplotlib==3.8.2
+
+# Development Environment
+jupyter==1.0.0
+ipython-sql==0.5.0
+
+# Utilities
+python-dateutil==2.8.2
