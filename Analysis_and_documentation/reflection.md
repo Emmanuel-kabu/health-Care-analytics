@@ -68,14 +68,23 @@ ON fact_encounters (encounter_date_key, specialty_key, total_allowed_amount);
 
 ### Quantified Performance Improvements
 
+**ACTUAL PERFORMANCE RESULTS ACHIEVED:**
+
 | Query | OLTP Time | Star Schema Time | Improvement Factor | Key Optimization |
 |-------|-----------|------------------|-------------------|------------------|
-| **Query 1:** Monthly Encounters by Specialty | 1.2s | 150ms | **8x faster** | Pre-computed dates, direct specialty joins |
-| **Query 2:** Top Diagnosis-Procedure Pairs | 2.8s | 700ms | **4x faster** | Optimized bridge tables, reduced row explosion |
-| **Query 3:** 30-Day Readmission Rate | 3.5s | 400ms | **9x faster** | Eliminated self-joins, pre-computed dates |
-| **Query 4:** Revenue by Specialty & Month | 1.8s | 100ms | **18x faster** | Pre-aggregated revenue, eliminated billing joins |
+| **Query 1:** Monthly Encounters by Specialty | 1815ms | 379ms | **4.8x faster** | Pre-computed dates, direct specialty joins |
+| **Query 2:** Top Diagnosis-Procedure Pairs | 1627ms | 0.25ms | **6,509x faster** | Materialized view optimization |
+| **Query 3:** 30-Day Readmission Rate | 503ms | 267ms | **1.9x faster** | Pre-computed readmission flags |
+| **Query 4:** Revenue by Specialty & Month | 1343ms | 229ms | **5.9x faster** | Pre-aggregated revenue, eliminated billing joins |
 
-**Overall Performance:** ~9.3 seconds → ~1.35 seconds = **7x total improvement**
+**Overall Performance:** 5.3 seconds → 0.88 seconds = **6x total improvement**
+
+**Performance Rating Analysis:**
+- **OLTP Schema:** 3 queries "Needs Optimization", 1 query "Fair" 
+- **Star Schema:** 1 query "Excellent", 3 queries "Good"
+- **All analytical queries now perform at acceptable levels for business intelligence**
+
+**Key Success Factor:** Q2 achieved extraordinary performance (6,509x improvement) through materialized view optimization, demonstrating the power of pre-computation for complex many-to-many analysis.
 
 ## Trade-offs: What Did You Gain? What Did You Lose?
 

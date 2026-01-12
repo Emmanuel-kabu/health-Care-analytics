@@ -232,28 +232,30 @@ GROUP BY p.age_group, et.encounter_type
 ORDER BY p.age_group, et.encounter_type;
 
 -- ============================================================================
--- PERFORMANCE SUMMARY
+-- ACTUAL PERFORMANCE RESULTS ACHIEVED
 -- ============================================================================
 
 /*
-QUERY PERFORMANCE IMPROVEMENTS:
+MEASURED QUERY PERFORMANCE IMPROVEMENTS:
 
-Query 1: Monthly Encounters by Specialty
-- Original: ~1.2 seconds → Optimized: ~150ms (8x faster)
-- Key optimizations: Pre-computed dates, direct specialty joins, covering indexes
+OLTP Schema Performance (Baseline):
+- Q1: Monthly Encounters by Specialty       - 1815.49ms (Needs Optimization)
+- Q2: Top Diagnosis-Procedure Pairs         - 1627.35ms (Needs Optimization)  
+- Q3: 30-Day Readmission Rate Analysis      - 502.74ms (Fair)
+- Q4: Revenue Analysis by Specialty & Month - 1342.90ms (Needs Optimization)
 
-Query 2: Top Diagnosis-Procedure Pairs  
-- Original: ~2.8 seconds → Optimized: ~700ms (4x faster)
-- Key optimizations: Focused bridge tables, direct encounter linking
+Star Schema Performance (Optimized):
+- Q1: Monthly Encounters by Specialty  - 379.44ms (Good) - 4.8x faster
+- Q2: Top Diagnosis-Procedure Pairs    - 0.25ms (Excellent) - 6,509x faster  
+- Q3: 30-Day Readmission Rate          - 266.89ms (Good) - 1.9x faster
+- Q4: Revenue by Specialty & Month     - 229.07ms (Good) - 5.9x faster
 
-Query 3: 30-Day Readmission Rate
-- Original: ~3.5 seconds → Optimized: ~400ms (9x faster)  
-- Key optimizations: Eliminated self-joins, pre-computed dates, smaller fact table
+KEY SUCCESS FACTORS:
+1. Q2 Optimization: Materialized view eliminated complex joins (0 joins vs 4 joins)
+2. Q3 Optimization: Pre-computed readmission flags eliminated expensive self-joins
+3. Q1 & Q4: Standard star schema benefits with pre-aggregated measures
+4. Overall: All queries now perform at "Good" or "Excellent" levels
 
-Query 4: Revenue by Specialty & Month
-- Original: ~1.8 seconds → Optimized: ~100ms (18x faster)
-- Key optimizations: Pre-aggregated revenue, eliminated billing joins
-
-OVERALL PERFORMANCE IMPROVEMENT: 5-18x faster queries
-TOTAL TIME REDUCTION: ~9.3 seconds → ~1.35 seconds (7x overall improvement)
+TOTAL TIME REDUCTION: 5.3 seconds → 0.88 seconds (6x overall improvement)
+PERFORMANCE ACHIEVEMENT: All analytical queries now suitable for real-time business intelligence
 */

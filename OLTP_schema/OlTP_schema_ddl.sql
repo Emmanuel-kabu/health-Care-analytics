@@ -5,7 +5,7 @@ DROP TABLE IF EXISTS providers CASCADE;
 DROP TABLE IF EXISTS encounters CASCADE;
 DROP TABLE IF EXISTS diagnoses CASCADE;
 DROP TABLE IF EXISTS encounter_diagnoses CASCADE;   
-DROP TABLE IF EXISTS proceduress CASCADE;
+DROP TABLE IF EXISTS procedures CASCADE;
 
 DROP TABLE IF EXISTS encounter_procedures CASCADE;
 DROP TABLE IF EXISTS billing CASCADE;
@@ -48,13 +48,12 @@ CREATE TABLE encounters (
   patient_id INT,
   provider_id INT,
   encounter_type VARCHAR (50), -- 'Outpatient', 'Inpatient', 'ER'
-  encounter_date DATETIME,
-  discharge_date DATETIME,
+  encounter_date TIMESTAMP,
+  discharge_date TIMESTAMP,
   department_id INT,
   FOREIGN KEY (patient_id) REFERENCES patients (patient_id),
   FOREIGN KEY (provider_id) REFERENCES providers (provider_id),
-  FOREIGN KEY (department_id) REFERENCES departments (department_id),
-  INDEX idx_encounter_date (encounter_date)
+  FOREIGN KEY (department_id) REFERENCES departments (department_id)
 );
 
 CREATE TABLE diagnoses (
@@ -72,7 +71,7 @@ CREATE TABLE encounter_diagnoses (
   FOREIGN KEY (diagnosis_id) REFERENCES diagnoses (diagnosis_id)
 );
 
-CREATE TABLE proceduresS (
+CREATE TABLE procedures (
   procedure_id INT PRIMARY KEY,
   cpt_code VARCHAR (10),
   cpt_description VARCHAR (200)
@@ -94,11 +93,12 @@ CREATE TABLE billing (
   allowed_amount DECIMAL (12, 2),
   claim_date DATE,
   claim_status VARCHAR (50),
-  FOREIGN KEY (encounter_id) REFERENCES encounters (encounter_id),
-  INDEX idx_claim_date (claim_date)
+  FOREIGN KEY (encounter_id) REFERENCES encounters (encounter_id)
 );
 
 -- Indexes for performance optimization
+CREATE INDEX idx_encounter_date ON encounters(encounter_date);
+CREATE INDEX idx_claim_date ON billing(claim_date);
 CREATE INDEX idx_patient_id ON encounters(patient_id);
 CREATE INDEX idx_provider_id ON encounters(provider_id);
 CREATE INDEX idx_department_id ON encounters(department_id);
