@@ -37,6 +37,38 @@ Notes
 - Audit triggers are created for OLTP tables; to audit DDL, add `log_audit_event('SCHEMA_CHANGE',...)` in migrations.  
 - Instrument your ETL procedures with `etl_logs.log_etl_step_start()` and `etl_logs.log_etl_step_complete()` for traceability and exports.
 
+Secure connection setup for dblink
+- Avoid putting plaintext passwords in repository SQL files. This project uses `dblink('service=<name>', '<sql>')` placeholders; configure a `pg_service` entry and a `.pgpass` (or use a secrets manager) on the host that runs the scripts.
+
+1) Create a `pg_service` entry (location: `~/.pg_service.conf` on Linux/macOS, or `%APPDATA%\\postgresql\\pg_service.conf` on Windows):
+
+```
+[hospital_db]
+host=localhost
+port=5432
+user=postgres
+dbname=hospital_db
+```
+
+2) Create a `.pgpass` file to store the password securely (location: `~/.pgpass` or `%APPDATA%\\postgresql\\pgpass.conf` on Windows). Example entry (do NOT commit this file):
+
+```
+localhost:5432:hospital_db:postgres:your_secure_password
+```
+
+3) File permissions: ensure `.pgpass` is only readable by the OS user (e.g., `chmod 600 ~/.pgpass` on Unix).
+
+4) Usage in SQL scripts (no password in-file):
+
+```sql
+-- in SQL: use the service name configured above
+SELECT * FROM dblink('service=hospital_db', 'SELECT id,name FROM some_table') AS t(id INT, name TEXT);
+```
+
+Alternative: use a secrets manager (Vault, AWS Secrets Manager, Azure Key Vault) and inject connection strings at runtime instead of storing credentials on disk.
+
+Recommendation: remove any plaintext passwords from files and use the service-based `dblink` calls (already applied in `star_schema/star_schema_dml.sql`).
+
 Useful commands
 ```powershell
 psql -h <host> -U <user> -d <db> -f audit_and_logging/etl_logging_framework.sql
@@ -159,7 +191,11 @@ health_care_Analytics/
 │   ├── query_analysis.txt
 │   ├── reflection.md
 │   ├── star_schema.txt
-│   └── star_schema_queries.txt
+│   ├── star_schema_queries.txt
+│   ├── explanation.md
+│   ├── user_guide.md
+│   ├── audit_component.md
+│   └── schema_validation.md
 ```
 
 ## Execution Instructions

@@ -2,6 +2,7 @@
 -- ENABLE REQUIRED EXTENSIONS
 -- ===================================================================
 CREATE EXTENSION IF NOT EXISTS dblink;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ===================================================================
 -- CREATE ETL HELPER FUNCTIONS (if not exists)
@@ -40,22 +41,26 @@ $$ LANGUAGE plpgsql;
 -- ===================================================================
 -- CREATE ETL STORED PROCEDURE
 -- ===================================================================
-CREATE OR REPLACE PROCEDURE run_healthcare_etl()
+CREATE OR REPLACE PROCEDURE run_healthcare_etl(p_execution_id UUID DEFAULT NULL)
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    v_execution_id UUID;
+    v_log_id INT;
+    v_rows BIGINT := 0;
 BEGIN
-    -- ===============================
-    -- 1. LOGGING
-    -- ===============================
+    v_execution_id := COALESCE(p_execution_id, gen_random_uuid());
     RAISE NOTICE '=======================================';
-    RAISE NOTICE 'Starting Healthcare ETL Procedure...';
+    RAISE NOTICE 'Starting Healthcare ETL Procedure (execution_id=%).', v_execution_id;
     RAISE NOTICE '=======================================';
 
     -- ===============================
-    -- 2. POPULATE DATE DIMENSION
+    -- 1. POPULATE DATE DIMENSION
     -- ===============================
-    RAISE NOTICE 'Populating date dimension...';
-    INSERT INTO dim_date (
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate date dimension', 1, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating date dimension...';
+        INSERT INTO dim_date (
         date_key, calendar_date, year, quarter, month, day_of_month,
         week_of_year, day_of_week, is_weekend, fiscal_year, fiscal_quarter
     )
@@ -81,13 +86,23 @@ BEGIN
         END as fiscal_quarter
     FROM generate_series('2019-01-01'::DATE, '2028-12-31'::DATE, '1 day'::INTERVAL) AS date_series
     ON CONFLICT (date_key) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
     -- ===============================
     -- 3. POPULATE DIMENSIONS (SPECIALTY, DEPARTMENT, ENCOUNTER TYPE)
     -- ===============================
-    RAISE NOTICE 'Populating specialty dimension...';
-    INSERT INTO dim_specialty (specialty_id, specialty_name, specialty_code, specialty_category)
-    SELECT specialty_id,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate specialty dimension', 2, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating specialty dimension...';
+        INSERT INTO dim_specialty (specialty_id, specialty_name, specialty_code, specialty_category)
+        SELECT specialty_id,
            specialty_name,
            specialty_code,
            CASE 
@@ -95,14 +110,24 @@ BEGIN
                WHEN specialty_name ILIKE '%diagnostic%' OR specialty_name ILIKE '%radiology%' THEN 'Diagnostic'
                ELSE 'Medical'
            END
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT specialty_id, specialty_name, specialty_code FROM specialties')
-         AS s(specialty_id INT, specialty_name VARCHAR(100), specialty_code VARCHAR(10))
-    ON CONFLICT (specialty_id) DO NOTHING;
+        FROM dblink('service=hospital_db',
+              'SELECT specialty_id, specialty_name, specialty_code FROM specialties')
+          AS s(specialty_id INT, specialty_name VARCHAR(100), specialty_code VARCHAR(10))
+        ON CONFLICT (specialty_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
-    RAISE NOTICE 'Populating department dimension...';
-    INSERT INTO dim_department (department_id, department_name, floor, capacity, department_type, cost_center_code)
-    SELECT department_id,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate department dimension', 3, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating department dimension...';
+        INSERT INTO dim_department (department_id, department_name, floor, capacity, department_type, cost_center_code)
+        SELECT department_id,
            department_name,
            floor,
            capacity,
@@ -112,14 +137,24 @@ BEGIN
                ELSE 'Inpatient'
            END as department_type,
            'CC' || LPAD(department_id::TEXT, 4, '0') as cost_center_code
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT department_id, department_name, floor, capacity FROM departments')
-         AS d(department_id INT, department_name VARCHAR(100), floor INT, capacity INT)
-    ON CONFLICT (department_id) DO NOTHING;
+        FROM dblink('service=hospital_db',
+              'SELECT department_id, department_name, floor, capacity FROM departments')
+          AS d(department_id INT, department_name VARCHAR(100), floor INT, capacity INT)
+        ON CONFLICT (department_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
-    RAISE NOTICE 'Populating encounter type dimension...';
-    INSERT INTO dim_encounter_type (encounter_type, type_description, typical_duration_hours, requires_admission)
-    SELECT DISTINCT encounter_type,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate encounter type dimension', 4, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating encounter type dimension...';
+        INSERT INTO dim_encounter_type (encounter_type, type_description, typical_duration_hours, requires_admission)
+        SELECT DISTINCT encounter_type,
            CASE 
                WHEN encounter_type = 'Inpatient' THEN 'Hospital admission requiring overnight stay'
                WHEN encounter_type IN ('ER','Emergency') THEN 'Emergency department visit'
@@ -132,17 +167,27 @@ BEGIN
                ELSE 2
            END as typical_duration_hours,
            CASE WHEN encounter_type = 'Inpatient' THEN TRUE ELSE FALSE END as requires_admission
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT DISTINCT encounter_type FROM encounters WHERE encounter_type IS NOT NULL')
-         AS et(encounter_type VARCHAR(50))
-    ON CONFLICT (encounter_type) DO NOTHING;
+        FROM dblink('service=hospital_db',
+              'SELECT DISTINCT encounter_type FROM encounters WHERE encounter_type IS NOT NULL')
+          AS et(encounter_type VARCHAR(50))
+        ON CONFLICT (encounter_type) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
     -- ===============================
     -- 4. POPULATE DIAGNOSIS AND PROCEDURE DIMENSIONS
     -- ===============================
-    RAISE NOTICE 'Populating diagnosis dimension...';
-    INSERT INTO dim_diagnosis (diagnosis_id, icd10_code, icd10_description, diagnosis_category, body_system, chronic_flag)
-    SELECT diagnosis_id,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate diagnosis dimension', 5, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating diagnosis dimension...';
+        INSERT INTO dim_diagnosis (diagnosis_id, icd10_code, icd10_description, diagnosis_category, body_system, chronic_flag)
+        SELECT diagnosis_id,
            icd10_code,
            icd10_description,
            CASE 
@@ -163,14 +208,24 @@ BEGIN
                WHEN icd10_description ILIKE '%diabetes%' OR icd10_description ILIKE '%hypertension%' OR icd10_description ILIKE '%heart failure%' THEN TRUE
                ELSE FALSE
            END
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT diagnosis_id, icd10_code, icd10_description FROM diagnoses')
-         AS d(diagnosis_id INT, icd10_code VARCHAR(10), icd10_description VARCHAR(200))
-    ON CONFLICT (diagnosis_id) DO NOTHING;
+        FROM dblink('service=hospital_db',
+              'SELECT diagnosis_id, icd10_code, icd10_description FROM diagnoses')
+          AS d(diagnosis_id INT, icd10_code VARCHAR(10), icd10_description VARCHAR(200))
+        ON CONFLICT (diagnosis_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
-    RAISE NOTICE 'Populating procedure dimension...';
-    INSERT INTO dim_procedure (procedure_id, cpt_code, cpt_description, procedure_category, procedure_type, typical_cost_range, duration_minutes)
-    SELECT procedure_id,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate procedure dimension', 6, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating procedure dimension...';
+        INSERT INTO dim_procedure (procedure_id, cpt_code, cpt_description, procedure_category, procedure_type, typical_cost_range, duration_minutes)
+        SELECT procedure_id,
            cpt_code,
            cpt_description,
            CASE 
@@ -196,17 +251,27 @@ BEGIN
                WHEN cpt_description ILIKE '%ct%' THEN 45
                ELSE 20
            END
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT procedure_id, cpt_code, cpt_description FROM procedures')
-         AS p(procedure_id INT, cpt_code VARCHAR(10), cpt_description VARCHAR(200))
-    ON CONFLICT (procedure_id) DO NOTHING;
+        FROM dblink('service=hospital_db',
+              'SELECT procedure_id, cpt_code, cpt_description FROM procedures')
+          AS p(procedure_id INT, cpt_code VARCHAR(10), cpt_description VARCHAR(200))
+        ON CONFLICT (procedure_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
     -- ===============================
     -- 5. POPULATE PATIENT AND PROVIDER DIMENSIONS
     -- ===============================
-    RAISE NOTICE 'Populating patient dimension...';
-    INSERT INTO dim_patient (patient_id, first_name, last_name, full_name, gender, date_of_birth, current_age, age_group, mrn)
-    SELECT patient_id,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate patient dimension', 7, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating patient dimension...';
+        INSERT INTO dim_patient (patient_id, first_name, last_name, full_name, gender, date_of_birth, current_age, age_group, mrn)
+        SELECT patient_id,
            first_name,
            last_name,
            first_name || ' ' || last_name,
@@ -215,14 +280,24 @@ BEGIN
            calculate_age(date_of_birth) as current_age,
            get_age_group(calculate_age(date_of_birth)) as age_group,
            mrn
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=Bukes',
-                'SELECT patient_id, first_name, last_name, date_of_birth, gender, mrn FROM patients')
-         AS p(patient_id INT, first_name VARCHAR(100), last_name VARCHAR(100), date_of_birth DATE, gender CHAR(1), mrn VARCHAR(20))
-    ON CONFLICT (patient_id) DO NOTHING;
+        FROM dblink('service=hospital_db',
+              'SELECT patient_id, first_name, last_name, date_of_birth, gender, mrn FROM patients')
+          AS p(patient_id INT, first_name VARCHAR(100), last_name VARCHAR(100), date_of_birth DATE, gender CHAR(1), mrn VARCHAR(20))
+        ON CONFLICT (patient_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
-    RAISE NOTICE 'Populating provider dimension...';
-    INSERT INTO dim_provider (provider_id, first_name, last_name, full_name, credential, specialty_key, department_key, specialty_name, department_name)
-    SELECT p.provider_id,
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate provider dimension', 8, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating provider dimension...';
+        INSERT INTO dim_provider (provider_id, first_name, last_name, full_name, credential, specialty_key, department_key, specialty_name, department_name)
+        SELECT p.provider_id,
            p.first_name,
            p.last_name,
            p.first_name || ' ' || p.last_name,
@@ -231,18 +306,28 @@ BEGIN
            d.department_key,
            s.specialty_name,
            d.department_name
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT provider_id, first_name, last_name, credential, specialty_id, department_id FROM providers')
-         AS p(provider_id INT, first_name VARCHAR(100), last_name VARCHAR(100), credential VARCHAR(20), specialty_id INT, department_id INT)
+        FROM dblink('service=hospital_db',
+              'SELECT provider_id, first_name, last_name, credential, specialty_id, department_id FROM providers')
+          AS p(provider_id INT, first_name VARCHAR(100), last_name VARCHAR(100), credential VARCHAR(20), specialty_id INT, department_id INT)
     JOIN dim_specialty s ON p.specialty_id = s.specialty_id
     JOIN dim_department d ON p.department_id = d.department_id
-    ON CONFLICT (provider_id) DO NOTHING;
+        ON CONFLICT (provider_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
     -- ===============================
     -- 6. POPULATE FACT TABLE
     -- ===============================
-    RAISE NOTICE 'Populating fact encounters table...';
-    INSERT INTO fact_encounters (
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate fact_encounters', 9, NULL);
+    BEGIN
+        RAISE NOTICE 'Populating fact encounters table...';
+        INSERT INTO fact_encounters (
         encounter_id, patient_key, provider_key, encounter_type_key,
         encounter_date_key, discharge_date_key, specialty_key, department_key,
         total_claim_amount, total_allowed_amount, diagnosis_count, procedure_count,
@@ -264,63 +349,84 @@ BEGIN
         CASE WHEN e.discharge_date IS NOT NULL THEN EXTRACT(EPOCH FROM (e.discharge_date - e.encounter_date))/3600 ELSE 0 END as length_of_stay_hours,
         e.encounter_date as encounter_datetime,
         e.discharge_date as discharge_datetime
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT encounter_id, patient_id, provider_id, encounter_type, encounter_date, discharge_date, department_id FROM encounters')
-         AS e(encounter_id INT, patient_id INT, provider_id INT, encounter_type VARCHAR(50), encounter_date TIMESTAMP, discharge_date TIMESTAMP, department_id INT)
+        FROM dblink('service=hospital_db',
+              'SELECT encounter_id, patient_id, provider_id, encounter_type, encounter_date, discharge_date, department_id FROM encounters')
+          AS e(encounter_id INT, patient_id INT, provider_id INT, encounter_type VARCHAR(50), encounter_date TIMESTAMP, discharge_date TIMESTAMP, department_id INT)
     JOIN dim_patient p ON e.patient_id = p.patient_id
     JOIN dim_provider pr ON e.provider_id = pr.provider_id
     JOIN dim_encounter_type et ON e.encounter_type = et.encounter_type
-    LEFT JOIN dblink('host=localhost dbname=hospital_db user=postgres password=password',
+    LEFT JOIN dblink('service=hospital_db',
                      'SELECT encounter_id, claim_amount, allowed_amount FROM billing')
          AS b(encounter_id INT, claim_amount DECIMAL(12,2), allowed_amount DECIMAL(12,2))
          ON e.encounter_id = b.encounter_id
     LEFT JOIN (
-        SELECT encounter_id, COUNT(*) AS diagnosis_count
-        FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                    'SELECT encounter_id, diagnosis_id FROM encounter_diagnoses')
-             AS ed(encounter_id INT, diagnosis_id INT)
+         SELECT encounter_id, COUNT(*) AS diagnosis_count
+         FROM dblink('service=hospital_db',
+                  'SELECT encounter_id, diagnosis_id FROM encounter_diagnoses')
+              AS ed(encounter_id INT, diagnosis_id INT)
         GROUP BY encounter_id
     ) diag_counts ON e.encounter_id = diag_counts.encounter_id
     LEFT JOIN (
-        SELECT encounter_id, COUNT(*) AS procedure_count
-        FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                    'SELECT encounter_id, procedure_id FROM encounter_procedures')
-             AS ep(encounter_id INT, procedure_id INT)
+         SELECT encounter_id, COUNT(*) AS procedure_count
+         FROM dblink('service=hospital_db',
+                  'SELECT encounter_id, procedure_id FROM encounter_procedures')
+              AS ep(encounter_id INT, procedure_id INT)
         GROUP BY encounter_id
     ) proc_counts ON e.encounter_id = proc_counts.encounter_id
     ON CONFLICT (encounter_id) DO NOTHING;
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
 
     -- ===============================
     -- 7. POPULATE BRIDGE TABLES
     -- ===============================
-    RAISE NOTICE 'Populating bridge tables...';
+        v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Populate bridge tables', 10, NULL);
+        BEGIN
+         RAISE NOTICE 'Populating bridge tables...';
 
-    -- Encounter-Diagnoses
-    INSERT INTO bridge_encounter_diagnoses (encounter_key, diagnosis_key, diagnosis_sequence, diagnosis_present_on_admission)
-    SELECT f.encounter_key, d.diagnosis_key, ed.diagnosis_sequence, TRUE
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT encounter_id, diagnosis_id, diagnosis_sequence FROM encounter_diagnoses')
-         AS ed(encounter_id INT, diagnosis_id INT, diagnosis_sequence INT)
-    JOIN fact_encounters f ON ed.encounter_id = f.encounter_id
-    JOIN dim_diagnosis d ON ed.diagnosis_id = d.diagnosis_id;
+         -- Encounter-Diagnoses
+         INSERT INTO bridge_encounter_diagnoses (encounter_key, diagnosis_key, diagnosis_sequence, diagnosis_present_on_admission)
+         SELECT f.encounter_key, d.diagnosis_key, ed.diagnosis_sequence, TRUE
+         FROM dblink('service=hospital_db',
+                  'SELECT encounter_id, diagnosis_id, diagnosis_sequence FROM encounter_diagnoses')
+              AS ed(encounter_id INT, diagnosis_id INT, diagnosis_sequence INT)
+         JOIN fact_encounters f ON ed.encounter_id = f.encounter_id
+         JOIN dim_diagnosis d ON ed.diagnosis_id = d.diagnosis_id;
 
-    -- Encounter-Procedures
-    INSERT INTO bridge_encounter_procedures (encounter_key, procedure_key, procedure_date_key, procedure_sequence, procedure_status)
-    SELECT f.encounter_key,
-           pr.procedure_key,
-           generate_date_key(ep.procedure_date) as procedure_date_key,
-           ROW_NUMBER() OVER (PARTITION BY ep.encounter_id ORDER BY ep.procedure_date) as procedure_sequence,
-           'Completed' as procedure_status
-    FROM dblink('host=localhost dbname=hospital_db user=postgres password=password',
-                'SELECT encounter_id, procedure_id, procedure_date FROM encounter_procedures')
-         AS ep(encounter_id INT, procedure_id INT, procedure_date DATE)
-    JOIN fact_encounters f ON ep.encounter_id = f.encounter_id
-    JOIN dim_procedure pr ON ep.procedure_id = pr.procedure_id;
+         -- Encounter-Procedures
+         INSERT INTO bridge_encounter_procedures (encounter_key, procedure_key, procedure_date_key, procedure_sequence, procedure_status)
+         SELECT f.encounter_key,
+             pr.procedure_key,
+             generate_date_key(ep.procedure_date) as procedure_date_key,
+             ROW_NUMBER() OVER (PARTITION BY ep.encounter_id ORDER BY ep.procedure_date) as procedure_sequence,
+             'Completed' as procedure_status
+         FROM dblink('service=hospital_db',
+                  'SELECT encounter_id, procedure_id, procedure_date FROM encounter_procedures')
+              AS ep(encounter_id INT, procedure_id INT, procedure_date DATE)
+         JOIN fact_encounters f ON ep.encounter_id = f.encounter_id
+         JOIN dim_procedure pr ON ep.procedure_id = pr.procedure_id;
+
+         GET DIAGNOSTICS v_rows = ROW_COUNT;
+         PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+        EXCEPTION WHEN OTHERS THEN
+         UPDATE etl_logs.etl_execution_log
+         SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+         WHERE log_id = v_log_id;
+         RAISE;
+        END;
 
     -- ===============================
     -- 8. CALCULATE READMISSION METRICS (STAR SCHEMA OPTIMIZATION)
     -- ===============================
-    RAISE NOTICE 'Calculating readmission metrics for performance optimization...';
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Calculate readmission metrics', 11, NULL);
+    BEGIN
+        RAISE NOTICE 'Calculating readmission metrics for performance optimization...';
     
     -- First, add readmission columns to fact table if not exists
     BEGIN
@@ -379,29 +485,51 @@ BEGIN
         FROM fact_encounters f1
         WHERE f1.discharge_datetime IS NOT NULL  -- Only for discharged encounters
     )
-    UPDATE fact_encounters 
-    SET 
-        has_30day_readmission = ra.has_readmission,
-        days_to_readmission = ra.days_to_first_readmission,
-        is_readmission = ra.is_this_a_readmission,
-        readmission_count_30days = ra.readmission_count
-    FROM readmission_analysis ra
-    WHERE fact_encounters.encounter_key = ra.encounter_key;
+        UPDATE fact_encounters 
+        SET 
+            has_30day_readmission = ra.has_readmission,
+            days_to_readmission = ra.days_to_first_readmission,
+            is_readmission = ra.is_this_a_readmission,
+            readmission_count_30days = ra.readmission_count
+        FROM readmission_analysis ra
+        WHERE fact_encounters.encounter_key = ra.encounter_key;
+
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
     
     -- ===============================
     -- 9. UPDATE PRIMARY DIAGNOSIS
     -- ===============================
-    RAISE NOTICE 'Updating primary diagnosis keys...';
-    UPDATE fact_encounters
-    SET primary_diagnosis_key = (
-        SELECT bd.diagnosis_key
-        FROM bridge_encounter_diagnoses bd
-        WHERE bd.encounter_key = fact_encounters.encounter_key
-        AND bd.diagnosis_sequence = 1
-        LIMIT 1
-    );
+    v_log_id := etl_logs.log_etl_step_start(v_execution_id, 'run_healthcare_etl', 'Update primary diagnosis keys', 12, NULL);
+    BEGIN
+        RAISE NOTICE 'Updating primary diagnosis keys...';
+        UPDATE fact_encounters
+        SET primary_diagnosis_key = (
+            SELECT bd.diagnosis_key
+            FROM bridge_encounter_diagnoses bd
+            WHERE bd.encounter_key = fact_encounters.encounter_key
+            AND bd.diagnosis_sequence = 1
+            LIMIT 1
+        );
 
+        GET DIAGNOSTICS v_rows = ROW_COUNT;
+        PERFORM etl_logs.log_etl_step_complete(v_log_id, 'COMPLETED', v_rows, v_rows, 0, 0);
+    EXCEPTION WHEN OTHERS THEN
+        UPDATE etl_logs.etl_execution_log
+        SET status = 'FAILED', error_message = SQLERRM, end_time = CURRENT_TIMESTAMP, duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - start_time))
+        WHERE log_id = v_log_id;
+        RAISE;
+    END;
+
+    -- Final summary
     RAISE NOTICE 'ETL Procedure Completed Successfully!';
+    RAISE NOTICE 'ETL summary: %', etl_logs.generate_etl_summary(v_execution_id);
 END;
 $$;
 

@@ -12,11 +12,11 @@
 -- SCHEMA VALIDATION STORED PROCEDURE
 -- ===================================================================
 
-CREATE OR REPLACE PROCEDURE validate_healthcare_schemas()
+CREATE OR REPLACE PROCEDURE validate_healthcare_schemas(p_execution_id UUID DEFAULT NULL)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_execution_id UUID := gen_random_uuid();
+    v_execution_id UUID;
     v_log_id INTEGER;
     v_validation_errors INTEGER := 0;
     v_validation_warnings INTEGER := 0;
@@ -90,6 +90,7 @@ DECLARE
         
     rec RECORD;
 BEGIN
+    v_execution_id := COALESCE(p_execution_id, gen_random_uuid());
     -- ===============================
     -- 1. INITIALIZE VALIDATION SESSION
     -- ===============================
