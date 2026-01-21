@@ -1,8 +1,54 @@
-# Healthcare Analytics Lab Project
+# Healthcare Analytics Lab
 
-## Project Overview
+Concise, modular demo of: OLTP source schema → ETL → star schema (DW), with
+runtime ETL logging, schema validation, file exports, and HIPAA-aware audit
+trails.
 
-This project demonstrates the performance improvements achieved by transforming a normalized OLTP healthcare database into an optimized star schema data warehouse. The project includes comprehensive performance analysis comparing OLTP and star schema approaches across four critical business intelligence queries.
+Why this repo
+- Compare normalized OLTP vs. star schema performance.  
+- Provide production-ready helpers: ETL instrumentation, schema validation,
+  export reports, and audit logging.
+
+Recent additions (implemented)
+- `audit_and_logging/etl_logging_framework.sql` — ETL runtime logging schema and helper functions (`etl_logs`).
+- `audit_and_logging/file_output_logging.sql` — export procedures to produce CSV/JSON/HTML reports from `etl_logs`.
+- `audit_and_logging/healthcare_audit_framework.sql` — HIPAA-aware audit schema; updated to create DML triggers for OLTP tables.
+- `main/run_etl_and_checks.sql` — orchestration wrapper: runs ETL placeholder, validation, exports, and audit archival.
+
+Quick start (recommended order)
+1. `\i audit_and_logging/etl_logging_framework.sql` — create `etl_logs` objects
+2. `\i OLTP_schema/OLTP_schema_ddl.sql` (then `OLTP_schema_dml.sql` to load samples)
+3. `\i audit_and_logging/healthcare_audit_framework.sql` — install audit triggers
+4. `\i star_schema/star_schema.sql` and `\i star_schema/star_schema_dml.sql`
+5. `\i audit_and_logging/file_output_logging.sql` — exports and reports
+6. `\i validation/schema_validation.sql` then `CALL validate_healthcare_schemas();`
+7. `psql -f main/run_etl_and_checks.sql` — example orchestrator
+
+Files & modules
+- `main/` — orchestrator and helpers ([run_etl_and_checks.sql](main/run_etl_and_checks.sql))
+- `audit_and_logging/` — `etl_logging_framework.sql`, `file_output_logging.sql`, `healthcare_audit_framework.sql`
+- `OLTP_schema/` — source DDL/DML and queries
+- `star_schema/` — star schema DDL/DML and performance queries
+- `validation/` — schema validation routines
+- `Analysis_and_documentation/` — design notes and analysis
+
+Notes
+- On Windows update export paths from `/tmp/etl_exports` to `C:\\temp\\etl_exports`.  
+- Audit triggers are created for OLTP tables; to audit DDL, add `log_audit_event('SCHEMA_CHANGE',...)` in migrations.  
+- Instrument your ETL procedures with `etl_logs.log_etl_step_start()` and `etl_logs.log_etl_step_complete()` for traceability and exports.
+
+Useful commands
+```powershell
+psql -h <host> -U <user> -d <db> -f audit_and_logging/etl_logging_framework.sql
+psql -h <host> -U <user> -d <db> -f OLTP_schema/OLTP_schema_ddl.sql
+psql -h <host> -U <user> -d <db> -f audit_and_logging/healthcare_audit_framework.sql
+psql -h <host> -U <user> -d <db> -f main/run_etl_and_checks.sql
+```
+
+Contact & docs
+- See `Analysis_and_documentation/` for design rationale, ETL notes, and query analysis.
+
+Project completion: January 2026
 
 ## Business Questions Analyzed
 
@@ -87,24 +133,33 @@ CREATE DATABASE hospital_star_db;
 
 ```
 health_care_Analytics/
-├── README.md (this file)
-├── requirements.txt (Python dependencies)
+├── README.md
+├── requirements.txt
+├── main/
+│   └── run_etl_and_checks.sql
+├── audit_and_logging/
+│   ├── etl_logging_framework.sql
+│   ├── file_output_logging.sql
+│   └── healthcare_audit_framework.sql
 ├── OLTP_schema/
-│   ├── OLTP_schema_ddl.sql (Create normalized tables)
-│   ├── OLTP_schema_dml.sql (Load sample data)
-│   ├── OLTP_schema_queries.sql (Business intelligence queries)
-│   └── OLTP_performance_queries.sql (Performance measurement)
+│   ├── OLTP_schema_ddl.sql
++│   ├── OLTP_schema_dml.sql
+│   ├── OLTP_schema_queries.sql
+│   └── OLTP_performance_queries.sql
 ├── star_schema/
-│   ├── star_schema.sql (Create dimensional model)
-│   ├── star_schema_dml.sql (ETL process with optimizations)
-│   └── star_schema_performance_queries.sql (Performance analysis)
-└── Analysis_and_documentation/
-    ├── design_decisions.txt (Schema design rationale)
-    ├── query_analysis.txt (Performance bottleneck analysis)
-    ├── etl_design.txt (ETL process documentation)
-    ├── reflection.md (Project analysis and learnings)
-    ├── star_schema.txt (Dimensional model specification)
-    └── star_schema_queries.txt (Optimized query examples)
+│   ├── star_schema.sql
+│   ├── star_schema_dml.sql
+│   ├── star_schema_queries.sql
+│   └── star_schema_performance_queries.sql
+├── validation/
+│   └── schema_validation.sql
+├── Analysis_and_documentation/
+│   ├── design_decisions.txt
+│   ├── etl_design.txt
+│   ├── query_analysis.txt
+│   ├── reflection.md
+│   ├── star_schema.txt
+│   └── star_schema_queries.txt
 ```
 
 ## Execution Instructions
