@@ -5,13 +5,14 @@
 \set ON_ERROR_STOP on
 
 -- === Load supporting frameworks and schemas (idempotent) ===
-\i etl_logging_framework.sql
-\i healthcare_audit_framework.sql
-\i file_output_logging.sql
+\i ../audit_and_logging/etl_logging_framework.sql
+\i ../audit_and_logging/healthcare_audit_framework.sql
+\i ../audit_and_logging/file_output_logging.sql
+\i ../validation/schema_validation.sql
 
 -- Optionally ensure OLTP and star DDL are created (uncomment to run)
--- \i OLTP_schema/OLTP_schema_ddl.sql
--- \i star_schema/star_schema.sql
+-- \i ../OLTP_schema/OLTP_schema_ddl.sql
+-- \i ../star_schema/star_schema.sql
 
 -- === Orchestration logic ===
 DO $$

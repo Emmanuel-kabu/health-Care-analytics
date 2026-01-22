@@ -50,6 +50,19 @@ DECLARE
     v_rows BIGINT := 0;
 BEGIN
     v_execution_id := COALESCE(p_execution_id, gen_random_uuid());
+    
+    -- ===============================
+    -- INTEGRATION: Log Start of ETL in Audit Framework
+    -- ===============================
+    PERFORM healthcare_audit.log_audit_event(
+        p_event_type_code := 'ETL_EXECUTION',
+        p_operation_type := 'EXECUTE',
+        p_table_name := 'star_schema',
+        p_schema_name := 'star_schema',
+        p_query_text := 'Starting Healthcare ETL Procedure (execution_id=' || v_execution_id::TEXT || ')',
+        p_compliance_notes := 'ETL execution started'
+    );
+
     RAISE NOTICE '=======================================';
     RAISE NOTICE 'Starting Healthcare ETL Procedure (execution_id=%).', v_execution_id;
     RAISE NOTICE '=======================================';
@@ -530,6 +543,36 @@ BEGIN
     -- Final summary
     RAISE NOTICE 'ETL Procedure Completed Successfully!';
     RAISE NOTICE 'ETL summary: %', etl_logs.generate_etl_summary(v_execution_id);
+
+    -- ===============================
+    -- INTEGRATION: Log Completion of ETL in Audit Framework
+    -- ===============================
+    PERFORM healthcare_audit.log_audit_event(
+        p_event_type_code := 'ETL_EXECUTION', 
+        p_operation_type := 'EXECUTE',
+        p_table_name := 'star_schema',
+        p_schema_name := 'star_schema',
+        p_query_text := 'Completed Healthcare ETL Procedure (execution_id=' || v_execution_id::TEXT || ')',
+        p_success := TRUE,
+        p_compliance_notes := 'ETL execution completed successfully'
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    -- ===============================
+    -- INTEGRATION: Log Failure of ETL in Audit Framework
+    -- ===============================
+    PERFORM healthcare_audit.log_audit_event(
+        p_event_type_code := 'ETL_EXECUTION', 
+        p_operation_type := 'EXECUTE',
+        p_table_name := 'star_schema',
+        p_schema_name := 'star_schema',
+        p_query_text := 'Failed Healthcare ETL Procedure (execution_id=' || v_execution_id::TEXT || ')',
+        p_success := FALSE,
+        p_error_message := SQLERRM,
+        p_compliance_notes := 'ETL execution failed'
+    );
+    -- Re-raise the error to ensure the transaction aborts and is reported
+    RAISE;
 END;
 $$;
 

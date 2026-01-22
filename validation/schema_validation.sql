@@ -6,7 +6,7 @@
 -- ===================================================================
 
 -- Load the logging framework first
-\i etl_logging_framework.sql
+\i ../audit_and_logging/etl_logging_framework.sql
 
 -- ===================================================================
 -- SCHEMA VALIDATION STORED PROCEDURE
