@@ -347,6 +347,45 @@ d.year, d.month           -- Pre-computed date parts
 - **Indexing:** Add covering indexes for new query patterns
 - **Hardware:** Scale vertically (more RAM/CPU) or horizontally (read replicas)
 
+## Enterprise-Grade Compliance & Observability
+
+To move beyond a simple academic exercise and simulate a real-world healthcare environment, we integrated three critical frameworks into the ETL pipeline.
+
+### 1. HIPAA-Compliant Auditing Framework
+**Why it matters:** Healthcare data contains Protected Health Information (PHI). We cannot simply move data without tracking who accessed it and when.
+
+**Implementation (`audit_and_logging/healthcare_audit_framework.sql`):**
+- **`healthcare_audit.audit_log`:** A centralized, immutable log for all sensitive actions.
+- **`healthcare_audit.phi_access_log`:** specifically tracks access to patient records, recording the "Purpose of Access" and "Justification," which are strict HIPAA requirements.
+- **Integration:** The ETL pipeline now explicitly logs `ETL_EXECUTION` start/success/failure events to this audit log, ensuring that even automated data movement is accounted for in compliance audits.
+
+### 2. ETL Logging & Observability
+**Why it matters:** When an ETL job runs for hours, you need to know exactly which step failed and why. Merely seeing "Job Failed" is insufficient for operations.
+
+**Implementation (`audit_and_logging/etl_logging_framework.sql`):**
+- **Granular Steps:** The stored procedure `run_healthcare_etl` was instrumented to log the start and completion of every dimension load (e.g., "Populate Specialty", "Populate Fact Table").
+- **Performance Metrics:** We now track row counts (`rows_processed`, `rows_inserted`) and duration for every step.
+- **Result:** We can now pinpoint performance bottlenecks (e.g., "Fact Table load took 90% of the time") and identify exactly where data issues occurred.
+
+### 3. Automated Schema Validation
+**Why it matters:** "Garbage In, Garbage Out." If the source schema changes (e.g., a column is renamed) or data quality degrades (e.g., NULLs in critical ID fields), the Star Schema will inevitably break.
+
+**Implementation (`validation/schema_validation.sql`):**
+- **Pre-flight Checks:** The orchestrator runs `validate_healthcare_schemas` to compare the OLTP source against expectations before potentially corrupting the warehouse.
+- **Critical validations performed:**
+  - **Structural Integrity:** Ensures expected tables and columns exist.
+  - **Data Type Compatibility:** Checks if source data fits into target types.
+  - **Key Constraints:** Verifies that Primary Keys are not NULL in the source.
+
+### The Integrated Orchestrator
+We tied these components together in `main/run_etl_and_checks.sql`. This script acts as the "Air Traffic Controller":
+1.  Loads all frameworks.
+2.  Executes the ETL (wrapped in audit logging).
+3.  Immediately runs validation checks.
+4.  Exports logs and summaries for human review.
+
+This transforms the project from a simple SQL script into a robust, auditable data engineering pipeline.
+
 ## Conclusion
 
 This healthcare analytics project demonstrates that **careful dimensional modeling delivers transformative performance improvements** for analytical workloads. The 5-18x query performance gains enable real-time analytics, interactive dashboards, and data-driven decision making that would be impossible with the normalized OLTP schema.
